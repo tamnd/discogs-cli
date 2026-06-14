@@ -1,0 +1,10 @@
+title       = "discogs"
+baseURL     = "https://discogs-cli.tamnd.com/"
+description = "A command line for discogs."
+contentDir  = "content"
+outputDir   = "public"
+theme       = "tago-doks"
+syntaxHighlight = "true"
+
+[params]
+github = "https://github.com/tamnd/discogs-cli"
