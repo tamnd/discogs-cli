@@ -1,35 +1,34 @@
 // Package discogs is the library behind the discogs command line:
-// the HTTP client, request shaping, and the typed data models for discogs.
+// the HTTP client, request shaping, and the typed data models for the
+// Discogs music database API.
 //
 // The Client here is the spine every command shares. It sets a real
-// User-Agent, paces requests so a busy session stays polite, and retries the
-// transient failures (429 and 5xx) that any public site throws under load.
-// Build your endpoint calls and JSON decoding on top of it.
+// User-Agent, paces requests so a busy session stays polite, and retries
+// transient failures (429 and 5xx). Build endpoint calls and JSON decoding
+// on top of it.
 package discogs
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
-	"regexp"
-	"strings"
+	"strconv"
 	"time"
 )
 
-// DefaultUserAgent identifies the client to discogs. A real, honest
+// DefaultUserAgent identifies the client to Discogs. A real, honest
 // User-Agent is both polite and the thing most likely to keep you unblocked.
-const DefaultUserAgent = "discogs/dev (+https://github.com/tamnd/discogs-cli)"
+const DefaultUserAgent = "discogs-cli/0.1.0 (github.com/tamnd/discogs-cli)"
 
-// Host is the site this client talks to, and the host the URI driver in
-// domain.go claims. The scaffold points it at discogs.com; change it once you
-// know the real endpoints you want to read.
-const Host = "discogs.com"
+// Host is the API host this client talks to.
+const Host = "api.discogs.com"
 
 // BaseURL is the root every request is built from.
 const BaseURL = "https://" + Host
 
-// Client talks to discogs over HTTP.
+// Client talks to the Discogs API over HTTP.
 type Client struct {
 	HTTP      *http.Client
 	UserAgent string
@@ -41,19 +40,18 @@ type Client struct {
 }
 
 // NewClient returns a Client with sensible defaults: a 30s timeout, a 200ms
-// minimum gap between requests, and five retries on transient errors.
+// minimum gap between requests, and three retries on transient errors.
 func NewClient() *Client {
 	return &Client{
 		HTTP:      &http.Client{Timeout: 30 * time.Second},
 		UserAgent: DefaultUserAgent,
 		Rate:      200 * time.Millisecond,
-		Retries:   5,
+		Retries:   3,
 	}
 }
 
-// Get fetches url and returns the response body. It paces and retries according
-// to the client's settings. The caller owns nothing extra; the body is read
-// fully and closed here.
+// Get fetches url and returns the response body. It paces and retries
+// according to the client's settings.
 func (c *Client) Get(ctx context.Context, url string) ([]byte, error) {
 	var lastErr error
 	for attempt := 0; attempt <= c.Retries; attempt++ {
@@ -123,78 +121,249 @@ func backoff(attempt int) time.Duration {
 	return d
 }
 
-// Page is the scaffold's one example record: a single page, addressed by the
-// path that names it on discogs.com. It is a stand-in for the typed records you
-// will model from the real discogs endpoints. The kit struct tags make it
-// addressable as a resource URI (see domain.go): ID is the URI id, and Body is
-// the long text `discogs cat` and the Markdown export print.
-type Page struct {
-	ID    string `json:"id" kit:"id"`
-	URL   string `json:"url"`
-	Title string `json:"title,omitempty"`
-	Body  string `json:"body,omitempty" kit:"body"`
+// --- Output types ---
+
+// SearchResult is one item returned by the database search endpoint.
+type SearchResult struct {
+	ID    int    `kit:"id" json:"id"`
+	Title string `json:"title"`
+	Type  string `json:"type"`
+	URI   string `json:"uri"`
+	Thumb string `json:"thumb"`
 }
 
-// GetPage fetches one page by its path (for example "wiki/Go") and returns it as
-// a record. The scaffold keeps a plain-text preview of the response as the body;
-// replace the parsing with the real fields once you know the endpoint's shape.
-func (c *Client) GetPage(ctx context.Context, path string) (*Page, error) {
-	path = strings.Trim(path, "/")
-	url := BaseURL + "/" + path
-	body, err := c.Get(ctx, url)
+// Artist is a Discogs artist record.
+type Artist struct {
+	ID      int      `kit:"id" json:"id"`
+	Name    string   `json:"name"`
+	Profile string   `json:"profile"`
+	URLs    []string `json:"urls"`
+	Members []string `json:"members"`
+}
+
+// Release is a Discogs release record.
+type Release struct {
+	ID        int      `kit:"id" json:"id"`
+	Title     string   `json:"title"`
+	Year      int      `json:"year"`
+	Artists   []string `json:"artists"`
+	Genres    []string `json:"genres"`
+	Styles    []string `json:"styles"`
+	Tracklist []Track  `json:"tracklist"`
+}
+
+// Track is one track entry in a release or master.
+type Track struct {
+	Position string `json:"position"`
+	Title    string `json:"title"`
+	Duration string `json:"duration"`
+}
+
+// Master is a Discogs master release record.
+type Master struct {
+	ID      int      `kit:"id" json:"id"`
+	Title   string   `json:"title"`
+	Year    int      `json:"year"`
+	Artists []string `json:"artists"`
+	Genres  []string `json:"genres"`
+	Styles  []string `json:"styles"`
+}
+
+// Label is a Discogs record label.
+type Label struct {
+	ID          int    `kit:"id" json:"id"`
+	Name        string `json:"name"`
+	Profile     string `json:"profile"`
+	ContactInfo string `json:"contact_info"`
+}
+
+// --- Wire types (for JSON decode only) ---
+
+type wireSearch struct {
+	Results    []SearchResult `json:"results"`
+	Pagination struct {
+		Items int `json:"items"`
+	} `json:"pagination"`
+}
+
+type wireArtistMember struct {
+	Name string `json:"name"`
+}
+
+type wireArtist struct {
+	ID             int                `json:"id"`
+	Name           string             `json:"name"`
+	Profile        string             `json:"profile"`
+	URLs           []string           `json:"urls"`
+	Namevariations []string           `json:"namevariations"`
+	Members        []wireArtistMember `json:"members"`
+}
+
+type wireCredit struct {
+	Name string `json:"name"`
+}
+
+type wireRelease struct {
+	ID        int          `json:"id"`
+	Title     string       `json:"title"`
+	Year      int          `json:"year"`
+	Artists   []wireCredit `json:"artists"`
+	Genres    []string     `json:"genres"`
+	Styles    []string     `json:"styles"`
+	Tracklist []Track      `json:"tracklist"`
+}
+
+type wireMaster struct {
+	ID        int          `json:"id"`
+	Title     string       `json:"title"`
+	Year      int          `json:"year"`
+	Artists   []wireCredit `json:"artists"`
+	Genres    []string     `json:"genres"`
+	Styles    []string     `json:"styles"`
+	Tracklist []Track      `json:"tracklist"`
+}
+
+type wireLabel struct {
+	ID          int    `json:"id"`
+	Name        string `json:"name"`
+	Profile     string `json:"profile"`
+	ContactInfo string `json:"contact_info"`
+}
+
+// --- API methods ---
+
+// Search queries the Discogs database.
+func (c *Client) Search(ctx context.Context, query, typ string, limit int) ([]*SearchResult, error) {
+	u := BaseURL + "/database/search?q=" + urlEncode(query)
+	if typ != "" && typ != "all" {
+		u += "&type=" + urlEncode(typ)
+	}
+	if limit > 0 {
+		u += "&per_page=" + strconv.Itoa(limit)
+	}
+	body, err := c.Get(ctx, u)
 	if err != nil {
 		return nil, err
 	}
-	return &Page{ID: path, URL: url, Title: path, Body: pageText(body)}, nil
-}
-
-// PageLinks fetches a page and returns the same-host pages it links to, as page
-// stubs. It shows the member-listing pattern the URI driver relies on: every
-// stub carries enough (an id and a URL) to be addressed and followed on its own.
-func (c *Client) PageLinks(ctx context.Context, path string, limit int) ([]*Page, error) {
-	path = strings.Trim(path, "/")
-	body, err := c.Get(ctx, BaseURL+"/"+path)
-	if err != nil {
-		return nil, err
+	var w wireSearch
+	if err := json.Unmarshal(body, &w); err != nil {
+		return nil, fmt.Errorf("decode search: %w", err)
 	}
-	var out []*Page
-	seen := map[string]bool{}
-	for _, p := range linkPaths(body) {
-		if seen[p] {
-			continue
-		}
-		seen[p] = true
-		out = append(out, &Page{ID: p, URL: BaseURL + "/" + p})
-		if limit > 0 && len(out) >= limit {
-			break
-		}
+	out := make([]*SearchResult, len(w.Results))
+	for i := range w.Results {
+		r := w.Results[i]
+		out[i] = &r
 	}
 	return out, nil
 }
 
-var (
-	hrefRE = regexp.MustCompile(`href="(/[^":#?]+)"`)
-	tagRE  = regexp.MustCompile(`<[^>]+>`)
-)
-
-// linkPaths pulls the relative link targets out of an HTML response, so a list
-// op can turn each into an addressable page stub.
-func linkPaths(body []byte) []string {
-	var out []string
-	for _, m := range hrefRE.FindAllSubmatch(body, -1) {
-		if p := strings.Trim(string(m[1]), "/"); p != "" {
-			out = append(out, p)
-		}
+// GetArtist fetches an artist by numeric ID.
+func (c *Client) GetArtist(ctx context.Context, id string) (*Artist, error) {
+	body, err := c.Get(ctx, BaseURL+"/artists/"+id)
+	if err != nil {
+		return nil, err
 	}
-	return out
+	var w wireArtist
+	if err := json.Unmarshal(body, &w); err != nil {
+		return nil, fmt.Errorf("decode artist: %w", err)
+	}
+	members := make([]string, len(w.Members))
+	for i, m := range w.Members {
+		members[i] = m.Name
+	}
+	return &Artist{
+		ID:      w.ID,
+		Name:    w.Name,
+		Profile: w.Profile,
+		URLs:    w.URLs,
+		Members: members,
+	}, nil
 }
 
-// pageText reduces an HTML response to a short plain-text preview, a stand-in
-// for the typed extract a real endpoint would hand you.
-func pageText(body []byte) string {
-	s := strings.Join(strings.Fields(tagRE.ReplaceAllString(string(body), " ")), " ")
-	if len(s) > 500 {
-		s = s[:500]
+// GetRelease fetches a release by numeric ID.
+func (c *Client) GetRelease(ctx context.Context, id string) (*Release, error) {
+	body, err := c.Get(ctx, BaseURL+"/releases/"+id)
+	if err != nil {
+		return nil, err
 	}
-	return s
+	var w wireRelease
+	if err := json.Unmarshal(body, &w); err != nil {
+		return nil, fmt.Errorf("decode release: %w", err)
+	}
+	artists := make([]string, len(w.Artists))
+	for i, a := range w.Artists {
+		artists[i] = a.Name
+	}
+	return &Release{
+		ID:        w.ID,
+		Title:     w.Title,
+		Year:      w.Year,
+		Artists:   artists,
+		Genres:    w.Genres,
+		Styles:    w.Styles,
+		Tracklist: w.Tracklist,
+	}, nil
+}
+
+// GetMaster fetches a master release by numeric ID.
+func (c *Client) GetMaster(ctx context.Context, id string) (*Master, error) {
+	body, err := c.Get(ctx, BaseURL+"/masters/"+id)
+	if err != nil {
+		return nil, err
+	}
+	var w wireMaster
+	if err := json.Unmarshal(body, &w); err != nil {
+		return nil, fmt.Errorf("decode master: %w", err)
+	}
+	artists := make([]string, len(w.Artists))
+	for i, a := range w.Artists {
+		artists[i] = a.Name
+	}
+	return &Master{
+		ID:      w.ID,
+		Title:   w.Title,
+		Year:    w.Year,
+		Artists: artists,
+		Genres:  w.Genres,
+		Styles:  w.Styles,
+	}, nil
+}
+
+// GetLabel fetches a record label by numeric ID.
+func (c *Client) GetLabel(ctx context.Context, id string) (*Label, error) {
+	body, err := c.Get(ctx, BaseURL+"/labels/"+id)
+	if err != nil {
+		return nil, err
+	}
+	var w wireLabel
+	if err := json.Unmarshal(body, &w); err != nil {
+		return nil, fmt.Errorf("decode label: %w", err)
+	}
+	return &Label{
+		ID:          w.ID,
+		Name:        w.Name,
+		Profile:     w.Profile,
+		ContactInfo: w.ContactInfo,
+	}, nil
+}
+
+// urlEncode does a minimal percent-encoding for query string values.
+func urlEncode(s string) string {
+	var out []byte
+	for i := 0; i < len(s); i++ {
+		b := s[i]
+		if isUnreserved(b) {
+			out = append(out, b)
+		} else if b == ' ' {
+			out = append(out, '+')
+		} else {
+			out = append(out, '%', "0123456789ABCDEF"[b>>4], "0123456789ABCDEF"[b&0xf])
+		}
+	}
+	return string(out)
+}
+
+func isUnreserved(b byte) bool {
+	return (b >= 'A' && b <= 'Z') || (b >= 'a' && b <= 'z') ||
+		(b >= '0' && b <= '9') || b == '-' || b == '_' || b == '.' || b == '~'
 }
